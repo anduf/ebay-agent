@@ -1,6 +1,6 @@
 import express from "express";
 import { handleIncomingMessage } from "./agent.js";
-import { verifyEbayWebhook, getEbayMessages, replyEbayMessage } from "./ebay.js";
+import { getEbayMessages, replyEbayMessage } from "./ebay.js";
 
 const app = express();
 app.use(express.json());
@@ -11,9 +11,17 @@ app.get("/webhook/ebay", async (req, res) => {
   if (!challenge) return res.status(400).send("Missing challenge_code");
 
   const crypto = await import("crypto");
+
+  // Constrói a URL exata como o eBay a conhece
+  const protocol = req.get("x-forwarded-proto") || "https";
+  const host = req.get("host");
+  const endpoint = `${protocol}://${host}${req.path}`;
+
+  console.log(`[Verification] challenge=${challenge} endpoint=${endpoint}`);
+
   const hash = crypto
     .createHash("sha256")
-    .update(challenge + process.env.EBAY_VERIFICATION_TOKEN + process.env.WEBHOOK_ENDPOINT)
+    .update(challenge + process.env.EBAY_VERIFICATION_TOKEN + endpoint)
     .digest("hex");
 
   res.json({ challengeResponse: hash });
@@ -34,27 +42,23 @@ app.post("/webhook/ebay", async (req, res) => {
 
     if (!itemId || !buyerUsername) return;
 
-    // Fetch full message thread
     const messages = await getEbayMessages(itemId, buyerUsername);
     if (!messages?.length) return;
 
     const lastMessage = messages[messages.length - 1];
-    if (lastMessage.sender === "SELLER") return; // avoid self-reply loop
+    if (lastMessage.sender === "SELLER") return;
 
     const buyerText = lastMessage.text;
     console.log(`[eBay] Message from ${buyerUsername}: ${buyerText}`);
 
-    // Build conversation history for Claude
     const history = messages.map((m) => ({
       role: m.sender === "BUYER" ? "user" : "assistant",
       content: m.text,
     }));
 
-    // Get Claude's response
     const reply = await handleIncomingMessage(history);
     console.log(`[Claude] Reply: ${reply}`);
 
-    // Send reply back via eBay API
     await replyEbayMessage(itemId, buyerUsername, reply);
     console.log(`[eBay] Reply sent to ${buyerUsername}`);
   } catch (err) {
